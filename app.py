@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import random
 import logging
@@ -8,18 +9,31 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# Настройка логирования – всё будет видно в логах Render
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("Токен не найден! Проверь переменную BOT_TOKEN")
+    logger.error("❌ Токен не найден! Проверь переменную BOT_TOKEN")
+    sys.exit(1)
 
-logging.basicConfig(level=logging.INFO)
+logger.info("✅ Токен загружен")
 
 # Загружаем вопросы
-with open("questions.json", "r", encoding="utf-8") as f:
-    ALL_QUESTIONS = json.load(f)
+try:
+    with open("questions.json", "r", encoding="utf-8") as f:
+        ALL_QUESTIONS = json.load(f)
+    logger.info(f"✅ Загружено {len(ALL_QUESTIONS)} вопросов")
+except Exception as e:
+    logger.error(f"❌ Ошибка загрузки questions.json: {e}")
+    sys.exit(1)
 
-# Статистика
 STATS_FILE = "stats.json"
 if os.path.exists(STATS_FILE):
     with open(STATS_FILE, "r", encoding="utf-8") as f:
@@ -33,21 +47,26 @@ def save_stats():
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-# ---------- Обработчики бота (те же самые) ----------
+# ---------- Обработчики бота ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    unique_topics = sorted(set(q["topic"].strip() for q in ALL_QUESTIONS))
-    context.bot_data['topics_list'] = unique_topics
-    keyboard = []
-    for idx, topic in enumerate(unique_topics):
-        keyboard.append([InlineKeyboardButton(f"🧪 {topic}", callback_data=f"topic_{idx}")])
-    keyboard.append([InlineKeyboardButton("📊 Моя статистика", callback_data="show_stats")])
-    keyboard.append([InlineKeyboardButton("🏆 Рейтинг", callback_data="show_rating")])
-    keyboard.append([InlineKeyboardButton("🗑 Сбросить статистику", callback_data="reset_stats")])
-    await update.message.reply_text(
-        "👋 Привет! Я помогу тебе выучить химию.\n"
-        "Выбери тему для викторины или воспользуйся кнопками ниже:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    logger.info(f"Получена команда /start от {update.effective_user.id}")
+    try:
+        unique_topics = sorted(set(q["topic"].strip() for q in ALL_QUESTIONS))
+        context.bot_data['topics_list'] = unique_topics
+        keyboard = []
+        for idx, topic in enumerate(unique_topics):
+            keyboard.append([InlineKeyboardButton(f"🧪 {topic}", callback_data=f"topic_{idx}")])
+        keyboard.append([InlineKeyboardButton("📊 Моя статистика", callback_data="show_stats")])
+        keyboard.append([InlineKeyboardButton("🏆 Рейтинг", callback_data="show_rating")])
+        keyboard.append([InlineKeyboardButton("🗑 Сбросить статистику", callback_data="reset_stats")])
+        await update.message.reply_text(
+            "👋 Привет! Я помогу тебе выучить химию.\n"
+            "Выбери тему для викторины или воспользуйся кнопками ниже:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        logger.info("✅ Ответ на /start отправлен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка в /start: {e}")
 
 async def setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -261,16 +280,20 @@ async def send_question(query, user_id):
         parse_mode="Markdown"
     )
 
-# ---------- Запуск бота в отдельном потоке ----------
+# ---------- Запуск бота ----------
 def run_bot():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setname", setname))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 Бот запущен...")
-    app.run_polling()
+    try:
+        app_bot = Application.builder().token(TOKEN).build()
+        app_bot.add_handler(CommandHandler("start", start))
+        app_bot.add_handler(CommandHandler("setname", setname))
+        app_bot.add_handler(CallbackQueryHandler(button_handler))
+        logger.info("🤖 Бот запущен и готов к работе!")
+        app_bot.run_polling()
+    except Exception as e:
+        logger.error(f"❌ Ошибка при запуске бота: {e}")
+        raise
 
-# ---------- Flask-сервер для Render ----------
+# ---------- Flask-сервер ----------
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -284,8 +307,10 @@ def health():
 if __name__ == "__main__":
     # Запускаем бота в фоновом потоке
     bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
     bot_thread.start()
     
-    # Запускаем Flask-сервер (Render требует открытый порт)
+    # Запускаем Flask
     port = int(os.environ.get("PORT", 5000))
+    logger.info(f"🚀 Запуск Flask на порту {port}")
     app_flask.run(host="0.0.0.0", port=port)
