@@ -14,23 +14,13 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Токен не найден! Проверь переменную BOT_TOKEN")
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Загружаем вопросы
-try:
-    with open("questions.json", "r", encoding="utf-8") as f:
-        ALL_QUESTIONS = json.load(f)
-    logger.info(f"✅ Загружено {len(ALL_QUESTIONS)} вопросов")
-except Exception as e:
-    logger.error(f"❌ Ошибка загрузки questions.json: {e}")
-    sys.exit(1)
+with open("questions.json", "r", encoding="utf-8") as f:
+    ALL_QUESTIONS = json.load(f)
+logger.info(f"✅ Загружено {len(ALL_QUESTIONS)} вопросов")
 
-# Статистика
 STATS_FILE = "stats.json"
 if os.path.exists(STATS_FILE):
     with open(STATS_FILE, "r", encoding="utf-8") as f:
@@ -44,7 +34,7 @@ def save_stats():
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-# ---------- Обработчики бота ----------
+# ---------- Обработчики (без изменений) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Получена команда /start от {update.effective_user.id}")
     unique_topics = sorted(set(q["topic"].strip() for q in ALL_QUESTIONS))
@@ -273,24 +263,24 @@ async def send_question(query, user_id):
         parse_mode="Markdown"
     )
 
-# ---------- Создание и инициализация Application ----------
-async def initialize_app():
-    """Создаёт и инициализирует Application для webhook"""
-    defaults = Defaults(parse_mode='HTML')
-    app = Application.builder().token(TOKEN).defaults(defaults).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setname", setname))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Инициализация и запуск (важно для работы с HTTPX)
-    await app.initialize()
-    await app.start()
-    return app
+# ---------- Создание Application ----------
+defaults = Defaults(parse_mode='HTML')
+app_bot = Application.builder().token(TOKEN).defaults(defaults).build()
+app_bot.add_handler(CommandHandler("start", start))
+app_bot.add_handler(CommandHandler("setname", setname))
+app_bot.add_handler(CallbackQueryHandler(button_handler))
 
-# Глобальная переменная для приложения бота
-app_bot = None
+# Инициализация и запуск (асинхронно)
+async def init_bot():
+    await app_bot.initialize()
+    await app_bot.start()
+    logger.info("✅ Бот инициализирован и запущен")
 
-# ---------- Flask-сервер ----------
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+loop.run_until_complete(init_bot())
+
+# ---------- Flask (с async view) ----------
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -299,13 +289,10 @@ def home():
 
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
-    """Обрабатывает входящие обновления от Telegram"""
-    global app_bot
-    if app_bot is None:
-        logger.error("❌ Бот не инициализирован!")
-        return jsonify({"error": "Bot not initialized"}), 500
+    """Асинхронный обработчик"""
     try:
-        update = Update.de_json(request.get_json(force=True), app_bot.bot)
+        data = request.get_json(force=True)
+        update = Update.de_json(data, app_bot.bot)
         await app_bot.process_update(update)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
@@ -316,25 +303,15 @@ async def webhook():
 def health():
     return "OK", 200
 
-# ---------- Запуск ----------
 if __name__ == "__main__":
-    # Устанавливаем вебхук
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         render_url = os.getenv("RENDER_EXTERNAL_URL")
         if render_url:
             webhook_url = f"{render_url}/webhook"
         else:
-            logger.warning("WEBHOOK_URL не задана! Используется локальный адрес (не для продакшена).")
             webhook_url = "http://localhost:5000/webhook"
     
-    # Создаём и инициализируем бота
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    app_bot = loop.run_until_complete(initialize_app())
-    logger.info("✅ Бот инициализирован и запущен")
-    
-    # Устанавливаем webhook
     try:
         loop.run_until_complete(app_bot.bot.set_webhook(webhook_url))
         logger.info(f"✅ Webhook установлен на {webhook_url}")
@@ -342,7 +319,7 @@ if __name__ == "__main__":
         logger.error(f"❌ Ошибка при установке webhook: {e}")
         sys.exit(1)
     
-    # Запускаем Flask
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Запуск Flask на порту {port}")
+    # Запускаем Flask с асинхронным циклом
     flask_app.run(host="0.0.0.0", port=port)
