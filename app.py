@@ -290,6 +290,10 @@ def home():
 async def webhook():
     """Принимает обновления от Telegram"""
     try:
+        # Важно: гарантируем, что приложение инициализировано для каждого запроса
+        # (или инициализируем один раз, но здесь проще проверить состояние)
+        if not app_bot.initialized:
+            await app_bot.initialize()
         update = Update.de_json(request.get_json(force=True), app_bot.bot)
         await app_bot.process_update(update)
         return jsonify({"status": "ok"}), 200
@@ -312,7 +316,8 @@ async def set_webhook():
             logger.warning("WEBHOOK_URL не задана! Используется локальный адрес (не для продакшена).")
             webhook_url = "http://localhost:5000/webhook"
     
-    # Используем async with для правильного управления контекстом
+    # Инициализируем приложение перед установкой вебхука
+    await app_bot.initialize()
     async with app_bot.bot:
         await app_bot.bot.set_webhook(webhook_url)
         logger.info(f"✅ Webhook установлен на {webhook_url}")
