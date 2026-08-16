@@ -14,7 +14,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Токен не найден! Проверь переменную BOT_TOKEN")
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -44,7 +43,7 @@ def save_stats():
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-# ---------- Обработчики бота ----------
+# ---------- Обработчики бота (те же самые) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Получена команда /start от {update.effective_user.id}")
     unique_topics = sorted(set(q["topic"].strip() for q in ALL_QUESTIONS))
@@ -290,10 +289,6 @@ def home():
 async def webhook():
     """Принимает обновления от Telegram"""
     try:
-        # Важно: гарантируем, что приложение инициализировано для каждого запроса
-        # (или инициализируем один раз, но здесь проще проверить состояние)
-        if not app_bot.initialized:
-            await app_bot.initialize()
         update = Update.de_json(request.get_json(force=True), app_bot.bot)
         await app_bot.process_update(update)
         return jsonify({"status": "ok"}), 200
@@ -305,29 +300,30 @@ async def webhook():
 def health():
     return "OK", 200
 
-# ---------- Функция для установки вебхука ----------
-async def set_webhook():
+# ---------- Функция для запуска бота и установки вебхука ----------
+async def main():
+    # Инициализируем приложение
+    await app_bot.initialize()
+    await app_bot.start()
+    logger.info("✅ Приложение инициализировано и запущено")
+
+    # Устанавливаем вебхук
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         render_url = os.getenv("RENDER_EXTERNAL_URL")
         if render_url:
             webhook_url = f"{render_url}/webhook"
         else:
-            logger.warning("WEBHOOK_URL не задана! Используется локальный адрес (не для продакшена).")
+            logger.warning("WEBHOOK_URL не задана, использую локальный адрес для теста")
             webhook_url = "http://localhost:5000/webhook"
-    
-    # Инициализируем приложение перед установкой вебхука
-    await app_bot.initialize()
-    async with app_bot.bot:
-        await app_bot.bot.set_webhook(webhook_url)
-        logger.info(f"✅ Webhook установлен на {webhook_url}")
 
-# ---------- Точка входа ----------
-if __name__ == "__main__":
-    # Устанавливаем вебхук
-    asyncio.run(set_webhook())
-    
-    # Запускаем Flask
+    await app_bot.bot.set_webhook(webhook_url)
+    logger.info(f"✅ Webhook установлен на {webhook_url}")
+
+    # Запускаем Flask (блокирующий вызов)
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Запуск Flask на порту {port}")
     flask_app.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    asyncio.run(main())
