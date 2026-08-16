@@ -3,6 +3,7 @@ import sys
 import json
 import random
 import logging
+import asyncio
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,9 +22,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Загружаем вопросы
-with open("questions.json", "r", encoding="utf-8") as f:
-    ALL_QUESTIONS = json.load(f)
-logger.info(f"✅ Загружено {len(ALL_QUESTIONS)} вопросов")
+try:
+    with open("questions.json", "r", encoding="utf-8") as f:
+        ALL_QUESTIONS = json.load(f)
+    logger.info(f"✅ Загружено {len(ALL_QUESTIONS)} вопросов")
+except Exception as e:
+    logger.error(f"❌ Ошибка загрузки questions.json: {e}")
+    sys.exit(1)
 
 # Статистика
 STATS_FILE = "stats.json"
@@ -39,7 +44,7 @@ def save_stats():
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-# ---------- Обработчики бота (те же, что были) ----------
+# ---------- Обработчики бота ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Получена команда /start от {update.effective_user.id}")
     unique_topics = sorted(set(q["topic"].strip() for q in ALL_QUESTIONS))
@@ -296,28 +301,26 @@ async def webhook():
 def health():
     return "OK", 200
 
-if __name__ == "__main__":
-    # Получаем URL для webhook из переменной окружения или формируем
-    # Render предоставляет URL сервиса в переменной RENDER_EXTERNAL_URL
+# ---------- Функция для установки вебхука ----------
+async def set_webhook():
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
-        # Если не задана, попробуем получить из RENDER_EXTERNAL_URL
         render_url = os.getenv("RENDER_EXTERNAL_URL")
         if render_url:
             webhook_url = f"{render_url}/webhook"
         else:
-            # Для локального запуска можно использовать ngrok или вручную задать
             logger.warning("WEBHOOK_URL не задана! Используется локальный адрес (не для продакшена).")
             webhook_url = "http://localhost:5000/webhook"
     
-    # Устанавливаем webhook
-    with app_bot.bot:
-        try:
-            app_bot.bot.set_webhook(webhook_url)
-            logger.info(f"✅ Webhook установлен на {webhook_url}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка при установке webhook: {e}")
-            sys.exit(1)
+    # Используем async with для правильного управления контекстом
+    async with app_bot.bot:
+        await app_bot.bot.set_webhook(webhook_url)
+        logger.info(f"✅ Webhook установлен на {webhook_url}")
+
+# ---------- Точка входа ----------
+if __name__ == "__main__":
+    # Устанавливаем вебхук
+    asyncio.run(set_webhook())
     
     # Запускаем Flask
     port = int(os.environ.get("PORT", 5000))
