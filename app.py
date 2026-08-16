@@ -3,37 +3,29 @@ import sys
 import json
 import random
 import logging
-import threading
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-
-# Настройка логирования – всё будет видно в логах Render
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    logger.error("❌ Токен не найден! Проверь переменную BOT_TOKEN")
-    sys.exit(1)
+    raise ValueError("❌ Токен не найден! Проверь переменную BOT_TOKEN")
 
-logger.info("✅ Токен загружен")
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Загружаем вопросы
-try:
-    with open("questions.json", "r", encoding="utf-8") as f:
-        ALL_QUESTIONS = json.load(f)
-    logger.info(f"✅ Загружено {len(ALL_QUESTIONS)} вопросов")
-except Exception as e:
-    logger.error(f"❌ Ошибка загрузки questions.json: {e}")
-    sys.exit(1)
+with open("questions.json", "r", encoding="utf-8") as f:
+    ALL_QUESTIONS = json.load(f)
+logger.info(f"✅ Загружено {len(ALL_QUESTIONS)} вопросов")
 
+# Статистика
 STATS_FILE = "stats.json"
 if os.path.exists(STATS_FILE):
     with open(STATS_FILE, "r", encoding="utf-8") as f:
@@ -47,26 +39,22 @@ def save_stats():
     with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2, ensure_ascii=False)
 
-# ---------- Обработчики бота ----------
+# ---------- Обработчики бота (те же, что были) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Получена команда /start от {update.effective_user.id}")
-    try:
-        unique_topics = sorted(set(q["topic"].strip() for q in ALL_QUESTIONS))
-        context.bot_data['topics_list'] = unique_topics
-        keyboard = []
-        for idx, topic in enumerate(unique_topics):
-            keyboard.append([InlineKeyboardButton(f"🧪 {topic}", callback_data=f"topic_{idx}")])
-        keyboard.append([InlineKeyboardButton("📊 Моя статистика", callback_data="show_stats")])
-        keyboard.append([InlineKeyboardButton("🏆 Рейтинг", callback_data="show_rating")])
-        keyboard.append([InlineKeyboardButton("🗑 Сбросить статистику", callback_data="reset_stats")])
-        await update.message.reply_text(
-            "👋 Привет! Я помогу тебе выучить химию.\n"
-            "Выбери тему для викторины или воспользуйся кнопками ниже:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        logger.info("✅ Ответ на /start отправлен")
-    except Exception as e:
-        logger.error(f"❌ Ошибка в /start: {e}")
+    unique_topics = sorted(set(q["topic"].strip() for q in ALL_QUESTIONS))
+    context.bot_data['topics_list'] = unique_topics
+    keyboard = []
+    for idx, topic in enumerate(unique_topics):
+        keyboard.append([InlineKeyboardButton(f"🧪 {topic}", callback_data=f"topic_{idx}")])
+    keyboard.append([InlineKeyboardButton("📊 Моя статистика", callback_data="show_stats")])
+    keyboard.append([InlineKeyboardButton("🏆 Рейтинг", callback_data="show_rating")])
+    keyboard.append([InlineKeyboardButton("🗑 Сбросить статистику", callback_data="reset_stats")])
+    await update.message.reply_text(
+        "👋 Привет! Я помогу тебе выучить химию.\n"
+        "Выбери тему для викторины или воспользуйся кнопками ниже:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -280,37 +268,58 @@ async def send_question(query, user_id):
         parse_mode="Markdown"
     )
 
-# ---------- Запуск бота ----------
-def run_bot():
-    try:
-        app_bot = Application.builder().token(TOKEN).build()
-        app_bot.add_handler(CommandHandler("start", start))
-        app_bot.add_handler(CommandHandler("setname", setname))
-        app_bot.add_handler(CallbackQueryHandler(button_handler))
-        logger.info("🤖 Бот запущен и готов к работе!")
-        app_bot.run_polling()
-    except Exception as e:
-        logger.error(f"❌ Ошибка при запуске бота: {e}")
-        raise
+# ---------- Создаём приложение Telegram ----------
+app_bot = Application.builder().token(TOKEN).build()
+app_bot.add_handler(CommandHandler("start", start))
+app_bot.add_handler(CommandHandler("setname", setname))
+app_bot.add_handler(CallbackQueryHandler(button_handler))
 
-# ---------- Flask-сервер ----------
-app_flask = Flask(__name__)
+# ---------- Flask-сервер для Webhook ----------
+flask_app = Flask(__name__)
 
-@app_flask.route('/')
+@flask_app.route('/')
 def home():
     return "🤖 Бот работает!"
 
-@app_flask.route('/health')
+@flask_app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Принимает обновления от Telegram"""
+    try:
+        update = Update.de_json(request.get_json(force=True), app_bot.bot)
+        await app_bot.process_update(update)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error(f"Ошибка в webhook: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@flask_app.route('/health')
 def health():
     return "OK", 200
 
 if __name__ == "__main__":
-    # Запускаем бота в фоновом потоке
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
+    # Получаем URL для webhook из переменной окружения или формируем
+    # Render предоставляет URL сервиса в переменной RENDER_EXTERNAL_URL
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if not webhook_url:
+        # Если не задана, попробуем получить из RENDER_EXTERNAL_URL
+        render_url = os.getenv("RENDER_EXTERNAL_URL")
+        if render_url:
+            webhook_url = f"{render_url}/webhook"
+        else:
+            # Для локального запуска можно использовать ngrok или вручную задать
+            logger.warning("WEBHOOK_URL не задана! Используется локальный адрес (не для продакшена).")
+            webhook_url = "http://localhost:5000/webhook"
+    
+    # Устанавливаем webhook
+    with app_bot.bot:
+        try:
+            app_bot.bot.set_webhook(webhook_url)
+            logger.info(f"✅ Webhook установлен на {webhook_url}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при установке webhook: {e}")
+            sys.exit(1)
     
     # Запускаем Flask
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Запуск Flask на порту {port}")
-    app_flask.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port)
