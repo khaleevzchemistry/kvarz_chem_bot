@@ -7,13 +7,14 @@ import asyncio
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, Defaults
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Токен не найден! Проверь переменную BOT_TOKEN")
 
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -272,11 +273,22 @@ async def send_question(query, user_id):
         parse_mode="Markdown"
     )
 
-# ---------- Инициализация приложения Telegram ----------
-app_bot = Application.builder().token(TOKEN).build()
-app_bot.add_handler(CommandHandler("start", start))
-app_bot.add_handler(CommandHandler("setname", setname))
-app_bot.add_handler(CallbackQueryHandler(button_handler))
+# ---------- Создание и инициализация Application ----------
+async def initialize_app():
+    """Создаёт и инициализирует Application для webhook"""
+    defaults = Defaults(parse_mode='HTML')
+    app = Application.builder().token(TOKEN).defaults(defaults).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setname", setname))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    # Инициализация и запуск (важно для работы с HTTPX)
+    await app.initialize()
+    await app.start()
+    return app
+
+# Глобальная переменная для приложения бота
+app_bot = None
 
 # ---------- Flask-сервер ----------
 flask_app = Flask(__name__)
@@ -287,12 +299,13 @@ def home():
 
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
+    """Обрабатывает входящие обновления от Telegram"""
+    global app_bot
+    if app_bot is None:
+        logger.error("❌ Бот не инициализирован!")
+        return jsonify({"error": "Bot not initialized"}), 500
     try:
-        # Инициализируем приложение при каждом запросе (или заранее в глобальном объекте)
-        # Но правильнее инициализировать один раз при старте
         update = Update.de_json(request.get_json(force=True), app_bot.bot)
-        # Важно: убедиться, что application инициализирован
-        # Мы сделаем это глобально через коллбэк
         await app_bot.process_update(update)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
@@ -303,30 +316,31 @@ async def webhook():
 def health():
     return "OK", 200
 
-# ---------- Функция для установки webhook ----------
-async def set_webhook():
+# ---------- Запуск ----------
+if __name__ == "__main__":
+    # Устанавливаем вебхук
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         render_url = os.getenv("RENDER_EXTERNAL_URL")
         if render_url:
             webhook_url = f"{render_url}/webhook"
         else:
-            logger.warning("WEBHOOK_URL не задана, используем локальный адрес")
+            logger.warning("WEBHOOK_URL не задана! Используется локальный адрес (не для продакшена).")
             webhook_url = "http://localhost:5000/webhook"
     
-    # Инициализируем приложение перед установкой
-    await app_bot.initialize()
+    # Создаём и инициализируем бота
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    app_bot = loop.run_until_complete(initialize_app())
+    logger.info("✅ Бот инициализирован и запущен")
     
-    async with app_bot.bot:
-        await app_bot.bot.set_webhook(webhook_url)
+    # Устанавливаем webhook
+    try:
+        loop.run_until_complete(app_bot.bot.set_webhook(webhook_url))
         logger.info(f"✅ Webhook установлен на {webhook_url}")
-        # Стартуем приложение (для обработки обновлений)
-        await app_bot.start()
-
-# ---------- Точка входа ----------
-if __name__ == "__main__":
-    # Устанавливаем webhook и инициализируем приложение
-    asyncio.run(set_webhook())
+    except Exception as e:
+        logger.error(f"❌ Ошибка при установке webhook: {e}")
+        sys.exit(1)
     
     # Запускаем Flask
     port = int(os.environ.get("PORT", 5000))
